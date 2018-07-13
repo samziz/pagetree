@@ -75,6 +75,10 @@ type Crawler struct {
 	VisitedURLsMutex sync.Mutex
 }
 
+func (c *Crawler) AddNode(n *Node) {
+	c.NewNodes <- n
+}
+
 // Crawl loads the start URL and robots policy, then spins up
 // goroutines to map the site.
 func (c *Crawler) Crawl(u url.URL) (m Map, err error) {
@@ -97,7 +101,7 @@ func (c *Crawler) Crawl(u url.URL) (m Map, err error) {
 	}
 
 	n := &Node{URL: u}
-	c.NewNodes <- n
+	go c.AddNode(n)
 	c.Map.Start = n
 
 	select {
@@ -141,60 +145,6 @@ func (c *Crawler) LoadRobotsPolicy(u url.URL) error {
 func (c *Crawler) addNodePtrsToChannel(n *Node) {
 	// TODO: Accept variadic args
 	c.NewNodes <- n
-}
-
-var counter int
-// Read from NewNodes channel until it's empty, writing any
-// links we find back to this channel.
-func (c *Crawler) worker(kill chan bool) {
-	for {
-	Start:
-		select {
-		case n, ok := <-c.NewNodes:
-			// Check for errors
-			switch {
-
-			case !ok,
-				!compareHosts(n.URL.Host, c.Host),
-				checkSliceForURL(n.URL, c.BannedURLs),
-				checkSliceForURL(n.URL, c.VisitedURLs):
-				goto Start
-
-			case c.MaxPages > -1 && len(c.VisitedURLs) > c.MaxPages:
-				kill <- true
-				return
-			}
-
-			// Make request to server and check response is not nil
-			res, err := c.request(n.URL)
-			if err != nil {
-				continue
-			}
-
-			urls, err := c.Parser.ParseLinks(res)
-			urls = c.excludeExternalLinks(urls)
-
-			nodes := CreateNodesFromURLs(urls)
-
-			// Write nodes to channel to be processed
-			var arr []*Node
-
-			for _, n := range nodes {
-				node := n
-				c.NewNodes <- &node
-				arr = append(arr, &node)
-			}
-
-			n.Children = arr
-
-			// Append to VisitedURLs
-			c.writeToVisitedURLs(n.URL)
-		case <-time.After(10*time.Second):
-			// Send signal for c.Crawl to return
-			kill <- true
-			return
-		}
-	}
 }
 
 // checkSliceForURL checks a slice for a URL.
@@ -277,10 +227,64 @@ func (c *Crawler) request(url url.URL) (*http.Response, error) {
 	return res, nil
 }
 
+// Read from NewNodes channel until it's empty, writing any
+// links we find back to this channel.
+func (c *Crawler) worker(kill chan bool) {
+	for {
+	Start:
+		select {
+		case n, ok := <-c.NewNodes:
+			// Check for errors
+			switch {
+
+			case !ok,
+				!compareHosts(n.URL.Host, c.Host),
+				checkSliceForURL(n.URL, c.BannedURLs),
+				checkSliceForURL(n.URL, c.VisitedURLs):
+				goto Start
+
+			case c.MaxPages > -1 && len(c.VisitedURLs) > c.MaxPages:
+				kill <- true
+				return
+			}
+
+			// Make request to server and check response is not nil
+			res, err := c.request(n.URL)
+			if err != nil {
+				continue
+			}
+
+			urls, err := c.Parser.ParseLinks(res)
+			urls = c.excludeExternalLinks(urls)
+
+			nodes := CreateNodesFromURLs(urls)
+
+			// Write nodes to channel to be processed
+			var arr []*Node
+
+			for _, n := range nodes {
+				node := n
+				c.NewNodes <- &node
+				arr = append(arr, &node)
+			}
+
+			n.Children = arr
+
+			// Append to VisitedURLs
+			c.writeToVisitedURLs(n.URL)
+		case <-time.After(10*time.Second):
+			// Send signal for c.Crawl to return
+			kill <- true
+			return
+		}
+	}
+}
+
 // writeToVisitedURLs is a safe interface to write a value to Crawler's
 // VisitedURLs array without race conditions causing double writes.
 func (c *Crawler) writeToVisitedURLs(u url.URL) {
 	c.VisitedURLsMutex.Lock()
+	defer c.VisitedURLsMutex.Unlock()
+	
 	c.VisitedURLs = append(c.VisitedURLs, u)
-	c.VisitedURLsMutex.Unlock()
 }
