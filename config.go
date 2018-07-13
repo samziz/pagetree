@@ -3,6 +3,10 @@ package main
 import "time"
 
 const (
+	// Crawler has a DefaultMaxPages of -1, which is interpreted
+	// as *no limit to the number of pages*.
+	DefaultMaxPages = -1
+
 	// Crawler will use a lot of goroutines by default.
 	DefaultMaxRoutines = 10000
 

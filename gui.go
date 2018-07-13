@@ -1,26 +1,26 @@
 package main
 
 import (
-	"os"
-	"sort"
+	"fmt"
+	"strings"
 )
 
-func PrintMap(m Map) {
-	n := m.First
+func PrintChildren(n Node, depth int) {
+	for i, c := range n.Children {
+		if len(c.Children) > 0 {
+			PrintChildren(*c, depth+1)
+		}
 
-	for len(n.Children) > 0 {
-		sortByAscendingChildrenLength(n.Children)
-	}
-
-	os.Stdout.Write()
-}
-
-func sortByAscendingChildrenLength(s *[]Node) {
-	// Simple bubble sort to sort a Node's
-	// children in descending order of length
-	for i := 1; i < len(*s); i++ {
-		if *s[i] > *s[i-1] {
-			*s[i], *s[i-1] = *s[i-1], *s[i]
+		ind := strings.Repeat(" ", depth)
+		if i == len(n.Children)-1 {
+			fmt.Println(ind, "└──", c.URL.String())
+		} else {
+			fmt.Println(ind, "├──", c.URL.String())
 		}
 	}
+}
+
+func PrintMap(m Map) {
+	fmt.Println(m.Start.URL.String())
+	PrintChildren(*m.Start, 0)
 }

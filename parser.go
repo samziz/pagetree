@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -59,6 +58,7 @@ func (p *Parser) ParseLinks(r *http.Response) ([]url.URL, error) {
 		links = append(links, u)
 	}
 
+
 	return links, nil
 }
 
@@ -81,17 +81,15 @@ func (p *Parser) ParseRobots(r *http.Response) ([]url.URL, error) {
 		
 		if matches := exp.FindAllStringSubmatch(l, -1); len(matches) > 0 {
 			
-			if len(matches) == 0 || len(matches[0]) < 2 {
-				fmt.Println("skipping")
+			// Bundle all our failure conditions together
+			switch {
+			case len(matches) == 0:
+			case len(matches[0]) < 2:
+			case matches[0][1] == "Disallow":
 				continue
 			}
 
-			val := matches[0][1]
 			path := matches[0][2]
-			
-			if val != "Disallow" {
-				continue
-			}
 
 			u, err := makeURL(*r.Request.URL, path)
 			if err != nil {
@@ -102,6 +100,7 @@ func (p *Parser) ParseRobots(r *http.Response) ([]url.URL, error) {
 		}
 	}
 
+	urls = dedupeURLArray(urls)
 	return urls, nil
 }
 
@@ -137,6 +136,22 @@ func makeURL(root url.URL, path string) (url.URL, error) {
 	}
 
 	return *url, nil
+}
+
+func dedupeURLArray(urls []url.URL) []url.URL {
+	uniqs := make([]url.URL, 0, len(urls))
+
+	for _, u := range urls {
+		for _, un := range uniqs {
+			if u == un {
+				continue
+			}
+		}
+
+		uniqs = append(uniqs, u)
+	}
+
+	return uniqs
 }
 
 // safelyReadBody reads from an http.Response body and returns it how it was

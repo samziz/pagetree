@@ -1,6 +1,8 @@
 package main
 
-import "net/url"
+import (
+	"net/url"
+	)
 
 // Map is a standard tree structure containing the first
 // Node, i.e. the URL the user starts crawling from.

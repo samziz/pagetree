@@ -1,28 +1,38 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"net/http"
 )
 
 func main() {
-	c := &Crawler{
+	c := Crawler{
 		Client: http.Client{
 			Timeout: DefaultTimeout,
 		},
-		MaxRoutines:   	 DefaultMaxRoutines,
 		NewNodes: 		 make(chan *Node),
 		RespectRobots:   DefaultRespectRobots,
 		Timeout:         DefaultTimeout,
 		UserAgent:       DefaultUserAgent,
 	}
 
+	// Disguise Crawler by default, or we won't be able to 
+	// crawl most websites.
 	c.DisguiseCrawler()
-	m, err := c.Crawl("https://stackoverflow.com/questions/46836534/golang-native-http-client-hangs-on-particular-uri")
+
+	// Apply settings specified by user.
+	ApplyFlags(&c)
+
+	// Get URL from command line
+	u, err := GetURLCommand()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	fmt.Println(m)
+	m, err := c.Crawl(u)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	PrintMap(m)
 }
