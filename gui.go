@@ -21,6 +21,11 @@ func PrintChildren(n Node, depth int) {
 }
 
 func PrintMap(m Map) {
-	fmt.Println(m.Start.URL.String())
+	// Print metadata
+	count := CountChildrenOfNode(*m.Start)
+	fmt.Println("Number of links found:", count)
+
+	// Print tree
+	fmt.Println("\n", m.Start.URL.String())
 	PrintChildren(*m.Start, 0)
 }

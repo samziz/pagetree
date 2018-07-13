@@ -15,6 +15,17 @@ type Node struct {
 	URL url.URL
 }
 
+
+func CountChildrenOfNode(n Node) int {
+	count := 1
+
+	for _, c := range n.Children {
+		count += CountChildrenOfNode(*c)
+	}
+
+	return count
+}
+
 func CreateNodesFromURLs(urls []url.URL) []Node {
 	nodes := make([]Node, len(urls))
 
