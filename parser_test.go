@@ -3,7 +3,7 @@ package main
 import (
 	"net/url"
 	"testing"
-	)
+)
 
 // We reuse the same Parser for all tests. We don't need to do any
 // configuration: Parser doesn't contain any fields, only methods.
@@ -18,7 +18,7 @@ func TestParseLinks(t *testing.T) {
 	}
 
 	links, err := p.ParseLinks(res)
-	
+
 	if err != nil {
 		t.Error(err)
 	}
@@ -49,8 +49,8 @@ func TestParseRobots(t *testing.T) {
 	}
 
 	if len(links) == 0 {
-		// We don't know for sure that our robots policy is always
-		// going to disallow any paths
+		// This is only a warning since we don't know for sure that
+		// our robots policy is always going to disallow any paths
 		t.Error("WARNING:", err)
 	}
 }

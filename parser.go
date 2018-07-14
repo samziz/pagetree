@@ -11,29 +11,15 @@ import (
 	"strings"
 )
 
-var (
-	// HTML body cannot be parsed at all
-	InvalidHTMLError = errors.New("Error: Could not parse as HTML document")
-
-	// Link is not valid error
-	InvalidLinkError = errors.New("Error: Link is invalid")
-
-	// Cannot parse as robots.txt document
-	InvalidRobotsError = errors.New("Error: Could not parse as robots.txt document")
-)
-
 // The Parser does two things for a Crawler: scans its Robots
-// file into a slice of banned URLs and scans each page for links. 
+// file into a slice of banned URLs and scans each page for links.
 type Parser struct {
-	
+
 }
-
-
-/*** Exported Parser functions ***/
 
 // ParseLinks takes an http.Response struct and returns an array of all the links
 // in that page (restricted to href links, not JavaScript).
-func (p *Parser) ParseLinks(r *http.Response) ([]url.URL, error) {
+func (*Parser) ParseLinks(r *http.Response) ([]url.URL, error) {
 	var links []url.URL
 
 	body, err := safelyReadBody(r)
@@ -41,7 +27,10 @@ func (p *Parser) ParseLinks(r *http.Response) ([]url.URL, error) {
 		return links, err
 	}
 
-	linkStrings := extractAllLinks(body)
+	linkStrings, err := extractAllLinks(body)
+	if err != nil {
+		return links, err
+	}
 
 	for _, str := range linkStrings {
 		u, err := makeURL(*r.Request.URL, str)
@@ -50,7 +39,7 @@ func (p *Parser) ParseLinks(r *http.Response) ([]url.URL, error) {
 			continue
 		}
 
-		err = validateLink(u)
+		err = ValidateURL(u)
 		if err != nil {
 			continue
 		}
@@ -58,13 +47,13 @@ func (p *Parser) ParseLinks(r *http.Response) ([]url.URL, error) {
 		links = append(links, u)
 	}
 
-
+	links = dedupeURLArray(links)
 	return links, nil
 }
 
 // ParseRobots reads a robots.txt file and writes the results to Crawler's
 // Policies list. We pass a pointer to p to avoid corrupting its Visits count.
-func (p *Parser) ParseRobots(r *http.Response) ([]url.URL, error) {
+func (*Parser) ParseRobots(r *http.Response) ([]url.URL, error) {
 	var urls []url.URL
 
 	bytes, err := ioutil.ReadAll(r.Body)
@@ -78,9 +67,9 @@ func (p *Parser) ParseRobots(r *http.Response) ([]url.URL, error) {
 
 	for _, l := range strings.Split(body, "\n") {
 		exp := regexp.MustCompile(`^(Allow|Disallow):\s?([^\s]*)\s*?$`)
-		
+
 		if matches := exp.FindAllStringSubmatch(l, -1); len(matches) > 0 {
-			
+
 			// Bundle all our failure conditions together
 			switch {
 			case len(matches) == 0:
@@ -100,16 +89,68 @@ func (p *Parser) ParseRobots(r *http.Response) ([]url.URL, error) {
 		}
 	}
 
-	urls = dedupeURLArray(urls)
 	return urls, nil
 }
 
+// ValidateURL makes sure that a URL is valid in a stronger sense
+// than url.Parse does. It checks that it conforms to the HTTP scheme
+// and leads to an HTML page we can crawl rather than e.g. a file.
+func ValidateURL(u url.URL) error {
+	_, err := url.ParseRequestURI(u.String())
+	if err != nil {
+		return err
+	}
+
+	exp := regexp.MustCompile(`http(s)?://(www.)?.*..*/`)
+	if !exp.MatchString(u.String()) {
+		return errors.New("Invalid URL or wrong scheme")
+	}
+
+	exp2 := regexp.MustCompile(`.jp(e?)g$|.css$|.ico$`)
+	if exp2.MatchString(u.String()) {
+		return errors.New("Bad document type")
+	}
+
+	return nil
+}
 
 
-/*** Unexported functions ***/
+/*** Functions for internal use ***/
 
-func extractAllLinks(body io.ReadCloser) (links []string) {
-	b, _ := ioutil.ReadAll(body)
+// dedupeURLArray takes an array of URLs and returns
+// that array with all duplicates removed.
+func dedupeURLArray(urls []url.URL) []url.URL {
+	uniqs := make([]url.URL, 0, len(urls))
+
+	for _, u := range urls {
+		exists := false
+
+		// Check if we already added u to our new array.
+		for _, un := range uniqs {
+			if u == un {
+				exists = true
+			}
+		}
+
+		// If we didn't, add it now.
+		if !exists {
+			uniqs = append(uniqs, u)
+		}
+	}
+
+	return uniqs
+}
+
+// extractAllLinks takes a Reader (strictly a ReadCloser) with HTML
+// contents and returns an array of all its links in string form.
+func extractAllLinks(body io.ReadCloser) ([]string, error) {
+	links := make([]string, 0, 20)
+
+	b, err := ioutil.ReadAll(body)
+	if err != nil {
+		return links, err
+	}
+
 	exp := regexp.MustCompile(`(?:document.location(?:.href)?|href)\s?=\s?(?:"|')([^"]*)(?:"|')`)
 
 	// Strip 'key' values returned by FindAllStringSubmatch
@@ -117,7 +158,7 @@ func extractAllLinks(body io.ReadCloser) (links []string) {
 		links = append(links, arr[1])
 	}
 
-	return
+	return links, nil
 }
 
 // MakeURL takes a root URL and a relative path (in string form)
@@ -138,48 +179,13 @@ func makeURL(root url.URL, path string) (url.URL, error) {
 	return *url, nil
 }
 
-func dedupeURLArray(urls []url.URL) []url.URL {
-	uniqs := make([]url.URL, 0, len(urls))
-
-	for _, u := range urls {
-		for _, un := range uniqs {
-			if u == un {
-				continue
-			}
-		}
-
-		uniqs = append(uniqs, u)
-	}
-
-	return uniqs
-}
-
 // safelyReadBody reads from an http.Response body and returns it how it was
 // found so that other functions, e.g. user callbacks, can read it properly.
 func safelyReadBody(r *http.Response) (io.ReadCloser, error) {
 	buf, _ := ioutil.ReadAll(r.Body)
-	rd := ioutil.NopCloser(bytes.NewBuffer(buf))
-	rd2 := ioutil.NopCloser(bytes.NewBuffer(buf))
+	rdr := ioutil.NopCloser(bytes.NewBuffer(buf))
+	rdr2 := ioutil.NopCloser(bytes.NewBuffer(buf))
 
-	r.Body = rd2
-	return rd, nil
-}
-
-func validateLink(u url.URL) error {
-	_, err := url.ParseRequestURI(u.String())
-	if err != nil {
-		return err
-	}
-
-	exp := regexp.MustCompile(`http(s)?://(www.)?.*..*/`)
-	if !exp.MatchString(u.String()) {
-		return errors.New("Invalid URL or wrong scheme")
-	}
-
-	exp2 := regexp.MustCompile(`.jp(e?)g$|.css$|.ico$`)
-	if exp2.MatchString(u.String()) {
-		return errors.New("Bad document type")
-	}
-
-	return nil
+	r.Body = rdr2
+	return rdr, nil
 }

@@ -11,11 +11,11 @@ func PrintChildren(n Node, depth int) {
 			PrintChildren(*c, depth+1)
 		}
 
-		ind := strings.Repeat(" ", depth)
+		idt := strings.Repeat(" ", depth)
 		if i == len(n.Children)-1 {
-			fmt.Println(ind, "└──", c.URL.String())
+			fmt.Println(idt, "└──", c.URL.String())
 		} else {
-			fmt.Println(ind, "├──", c.URL.String())
+			fmt.Println(idt, "├──", c.URL.String())
 		}
 	}
 }

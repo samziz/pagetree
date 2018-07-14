@@ -2,25 +2,11 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
-)
-
-/*** Errors ***/
-
-var (
-	// Robots.txt file forbids crawling this page
-	DisallowedError = errors.New("Error: Disallowed by robots.txt")
-
-	// Server returned response code 404
-	NotFoundError = errors.New("Error: Page not found")
-
-	// Server returned response code 500
-	ServerError = errors.New("Error: Server could not load page")
 )
 
 // A Crawler is the main interface to gocrawl, called from main.go.
@@ -32,31 +18,35 @@ type Crawler struct {
 	// theoretically be replaced with any type that embeds http.Client.
 	Client http.Client
 
-	// Host specifies the domain the user wants to crawl.
+	// CrawlRate sets the number of crawls per millisecond.
+	CrawlRate time.Duration
+
+	// Host sets the domain the user wants to crawl.
 	Host string
 
-	// Map stores all the pages visited in a tree structure.
+	// Map stores all the pages visited in a tree structure - or technically
+	// it stores the top node. See map.go for implementation details.
 	Map Map
 
 	// The Parser (defined in parser.go) does two jobs: parsing the robots file,
 	// and parsing for links.
 	Parser Parser
 
+	// RateTicker is used to limit the crawl rate, by default to 1 req/ms.
+	RateTicker *time.Ticker
+
 	// StartURL specifies the URL or URLs that Crawler should enter from.
 	StartURL url.URL
 
-	// Ticker is used to limit the crawl rate if the user specifies this.
-	Ticker *time.Ticker
-
-	// NewURLs contains pointers to Nodes to be crawled from. If a Node has no links
-	// or all its links are in VisitedURLs, it won't be modified.
+	// NewURLs contains pointers to Nodes in c.Map to be crawled from. If a Node has
+	// no links or all its links are in VisitedURLs, it won't be modified.
 	NewNodes chan *Node
 
-	// Timeout specifies the length of time Crawler should wait for a 
+	// Timeout specifies the length of time Crawler should wait for a
 	// response from any given page.
 	Timeout time.Duration
 
-	// Maximum number of goroutines Crawler is allowed to spin up
+	// MaxRoutines stores the number of goroutines Crawler is allowed to spin up.
 	MaxRoutines int
 
 	// Maximum number of pages Crawler should visit.
@@ -71,20 +61,18 @@ type Crawler struct {
 	UserAgent string
 
 	// VisitedURLs contains all the URLs Crawler has visited.
-	VisitedURLs []url.URL
 	VisitedURLsMutex sync.Mutex
+	VisitedURLs      []url.URL
 }
 
-func (c *Crawler) AddNode(n *Node) {
-	c.NewNodes <- n
-}
-
-// Crawl loads the start URL and robots policy, then spins up
-// goroutines to map the site.
+// Crawl loads the start URL and robots policy, then launches
+// a lot of goroutines to map the site. 
 func (c *Crawler) Crawl(u url.URL) (m Map, err error) {
+	// Store the hostname of the URL so we don't crawl external links.
 	c.Host = u.Host
 
-	// Start ticker to rate-limit visits
+	// If the user has chosen to respect the site's robots policy,
+	// load robots.txt and store disallowed paths in c.BannedURLs. 
 	if c.RespectRobots {
 		err = c.LoadRobotsPolicy(u)
 		if err != nil {
@@ -92,20 +80,31 @@ func (c *Crawler) Crawl(u url.URL) (m Map, err error) {
 		}
 	}
 
-	c.Ticker = time.NewTicker(time.Second)
+	// Initialise our Ticker to limit the crawl rate (we need
+	// this for concurrent crawling).
+	c.RateTicker = time.NewTicker(c.CrawlRate)
 
+	// Create a channel to receive kill signals from workers.
 	kill := make(chan bool)
 
+	// Spin up worker goroutines to get pointers to new Nodes
+	// from c.NewNodes, crawl them for links, then add these child
+	// nodes to the Map (and send pointers to NewNodes).
 	for i := 0; i < c.MaxRoutines; i++ {
 		go c.worker(kill)
 	}
 
-	n := &Node{URL: u}
-	go c.AddNode(n)
-	c.Map.Start = n
+	// Create the first Node in our Map and send
+	// to be processed by the workers we just launched.
+	c.Map.Start = &Node{URL: u}
+	go c.addNodes(c.Map.Start)
 
 	select {
+	// Wait to receive a kill signal from worker goroutines
+	// indicating the channel has not been written to for the
+	// period specified in c.Timeout (default is 5sec). 
 	case _ = <-kill:
+		// Return a copy of c.Map - fine since it only contains one pointer.
 		m = c.Map
 		return
 	}
@@ -118,6 +117,8 @@ func (c *Crawler) DisguiseCrawler() {
 	c.UserAgent = DecoyUserAgent
 }
 
+// LoadRobotsPolicy works out the path to robots.txt from the supplied
+// URL, then parses the page and stores any disallowed paths in c.BannedURLs.
 func (c *Crawler) LoadRobotsPolicy(u url.URL) error {
 	p, err := makeRobotsPath(u)
 	if err != nil {
@@ -142,9 +143,12 @@ func (c *Crawler) LoadRobotsPolicy(u url.URL) error {
 
 /*** Internal funcs ***/
 
-func (c *Crawler) addNodePtrsToChannel(n *Node) {
-	// TODO: Accept variadic args
-	c.NewNodes <- n
+// addNodes adds one or several Nodes to Crawler's NewNodes channel. This 
+// is wrapped in a function so it can easily be called as a goroutine.
+func (c *Crawler) addNodes(nodes ...*Node) {
+	for _, n := range nodes {
+		c.NewNodes <- n
+	}
 }
 
 // checkSliceForURL checks a slice for a URL.
@@ -158,6 +162,8 @@ func checkSliceForURL(u url.URL, s []url.URL) bool {
 	return false
 }
 
+// compareHosts checks if two URLs are equal. This is a surprisingly
+// complicated task 
 func compareHosts(h1 string, h2 string) bool {
 	if h1 == h2 {
 		return true
@@ -174,6 +180,57 @@ func compareHosts(h1 string, h2 string) bool {
 	return false
 }
 
+// crawlNode crawls from a particular Node in Crawler's Map and
+// creates new Nodes from the results. Designed to be called by workers.
+func (c *Crawler) crawlNode(n *Node, kill *chan bool) {
+	if !compareHosts(n.URL.Host, c.Host) {
+		return
+	}
+
+	if checkSliceForURL(n.URL, c.BannedURLs) {
+		return
+	}
+
+	if checkSliceForURL(n.URL, c.VisitedURLs) {
+		return
+	}
+
+	if c.MaxPages > -1 {
+		if len(c.VisitedURLs) > c.MaxPages {
+			*kill <- true
+			return
+		}
+	}
+
+	// Request the page and check we didn't fail (nb this only checks for
+	// a failure to connect to the server, not for a bad response).
+	res, err := c.request(n.URL)
+	if err != nil {
+		return
+	}
+
+	// Get all of the links out of the HTML document we just fetched.
+	urls, err := c.Parser.ParseLinks(res)
+	if err != nil {
+		return
+	}
+
+	// Go through the array and remove any links to external pages.
+	urls = c.excludeExternalLinks(urls)
+
+	nodes := CreateNodesFromURLs(urls)
+
+	// Write nodes to channel to be processed
+	for _, nn := range nodes {
+		node := nn
+		c.NewNodes <- &node
+		n.Children = append(n.Children, &node)
+	}
+
+	c.writeToVisitedURLs(n.URL)
+}
+
+// excludeExternalLinks to a slice of URLs and returns
 func (c *Crawler) excludeExternalLinks(urls []url.URL) []url.URL {
 	internalURLs := make([]url.URL, 0, len(urls))
 
@@ -188,6 +245,7 @@ func (c *Crawler) excludeExternalLinks(urls []url.URL) []url.URL {
 
 func makeRobotsPath(u url.URL) (*url.URL, error) {
 	var buf bytes.Buffer
+
 	var path = []string{u.Scheme, "://", u.Host, "/", "robots.txt"}
 
 	for _, s := range path {
@@ -231,60 +289,39 @@ func (c *Crawler) request(url url.URL) (*http.Response, error) {
 // links we find back to this channel.
 func (c *Crawler) worker(kill chan bool) {
 	for {
-	Start:
+		// Wrap our worker in a RateTicker to limit the number of crawls
+		// to whatever the user specifies.
 		select {
-		case n, ok := <-c.NewNodes:
-			// Check for errors
-			switch {
+		case <-c.RateTicker.C:
+			select {
+			case n, ok := <-c.NewNodes:
 
-			case !ok,
-				!compareHosts(n.URL.Host, c.Host),
-				checkSliceForURL(n.URL, c.BannedURLs),
-				checkSliceForURL(n.URL, c.VisitedURLs):
-				goto Start
+				// Kill workers and stop crawling if channel is 
+				// closed (this should never happen).
+				if !ok {
+					kill <- true
+					return
+				}
 
-			case c.MaxPages > -1 && len(c.VisitedURLs) > c.MaxPages:
+				c.crawlNode(n, &kill)
+
+			case <-time.After(c.Timeout):
+				// Send signal for c.Crawl to return if reading from
+				// channel blocks for a certain length of time.
 				kill <- true
 				return
 			}
-
-			// Make request to server and check response is not nil
-			res, err := c.request(n.URL)
-			if err != nil {
-				continue
-			}
-
-			urls, err := c.Parser.ParseLinks(res)
-			urls = c.excludeExternalLinks(urls)
-
-			nodes := CreateNodesFromURLs(urls)
-
-			// Write nodes to channel to be processed
-			var arr []*Node
-
-			for _, n := range nodes {
-				node := n
-				c.NewNodes <- &node
-				arr = append(arr, &node)
-			}
-
-			n.Children = arr
-
-			// Append to VisitedURLs
-			c.writeToVisitedURLs(n.URL)
-		case <-time.After(10*time.Second):
-			// Send signal for c.Crawl to return
-			kill <- true
-			return
 		}
+
 	}
 }
 
 // writeToVisitedURLs is a safe interface to write a value to Crawler's
-// VisitedURLs array without race conditions causing double writes.
+// VisitedURLs array. The append method is easiest but not thread-safe
+// since it creates temporary variables.
 func (c *Crawler) writeToVisitedURLs(u url.URL) {
 	c.VisitedURLsMutex.Lock()
 	defer c.VisitedURLsMutex.Unlock()
-	
+
 	c.VisitedURLs = append(c.VisitedURLs, u)
 }
